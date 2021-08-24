@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 import pathvalidate
 import requests
 from bs4 import BeautifulSoup
+from pytube import YouTube
 
 download_dir = 'download/'
 cache_dir = 'cache/'
@@ -41,7 +42,7 @@ with open('cookies.json') as file:
 
 
 def sanitize_filename(name: str) -> str:
-    return pathvalidate.sanitize_filename(name.strip())
+    return pathvalidate.sanitize_filename(name.strip())[:100]
 
 
 def load_content_from_internet(url: str, headers=None):
@@ -121,22 +122,32 @@ def clear_url(url: str) -> str:
 
 def get_module_header(content: str) -> str:
     soup = BeautifulSoup(content, 'html.parser')
-    a = soup.find('div', class_='page-header').find('a')
-    return a.text
+    lesson_header = soup.find(class_='lesson-title-value') or soup.find('title')
+    if lesson_header:
+        return lesson_header.text
+    page_header = soup.find('div', class_='page-header').find('a')
+    return page_header.text
+
+
+def add_scheme(url: str) -> str:
+    if url.startswith('http'):
+        return url
+    return 'https:' + url
 
 
 def get_all_video_src(content: str) -> List[dict]:
     soup = BeautifulSoup(content, 'html.parser')
     items = soup.find_all('iframe')
     stream = map(
-        lambda item: {'type': 'video_src', 'url': clear_url('https:' + item.get('src')), 'sourceline': item.sourceline},
+        lambda item: {'type': 'video_src', 'url': clear_url(add_scheme(item.get('src'))),
+                      'sourceline': item.sourceline},
         items)
     return list(stream)
 
 
 def get_all_headers(content: str) -> List[dict]:
     soup = BeautifulSoup(content, 'html.parser')
-    items = soup.find_all('div', class_='f-lesson-header-1')
+    items = soup.find_all('div')
     stream = list(map(lambda x: x.find_all('p'), items))
     stream = list(filter(lambda x: len(x) == 1, stream))
     stream = list(map(lambda x: x[0], stream))
@@ -155,6 +166,10 @@ def get_module_files(content: str) -> List[dict]:
     return list(stream)
 
 
+def get_direct_url_from_youtube(url: str):
+    return YouTube(url).streams.get_highest_resolution().url
+
+
 def get_direct_url_from_vimeo(content: str):
     config_begin = 'var config = '
     config_end = '; if'
@@ -170,19 +185,21 @@ def get_direct_url_from_vimeo(content: str):
 def get_video_info_list(content: str) -> list:
     all_video_src = get_all_video_src(content)
     all_headers = get_all_headers(content)
-    combine = all_video_src + all_headers
-    combine.sort(key=lambda x: x['sourceline'])
+    all_headers.sort(key=lambda x: x['sourceline'])
     result = []
-    for i in range(len(combine)):
-        current_item = combine[i]
-        if current_item['type'] == 'video_src' and i > 0:
-            prev_item = combine[i - 1]
-            if prev_item['type'] == 'header':
-                headers = {'Referer': 'https://vozhdenium.com/'}
-                video_url = current_item['url']
-                if 'vimeo' in video_url:
-                    video_direct_url = get_direct_url_from_vimeo(get_content(video_url, headers))
-                    result.append({'header': prev_item['text'], 'url': video_direct_url})
+    for index, video_src in enumerate(all_video_src):
+        near_header = \
+            (list(filter(lambda header: header['sourceline'] < video_src['sourceline'], all_headers)) or [None])[-1]
+        title = (near_header and near_header['text'])
+        unique_title = f"{index}_{title}" if title else f"{index}"
+        headers = {'Referer': 'https://vozhdenium.com/'}
+        video_url = video_src['url']
+        if 'vimeo' in video_url:
+            video_direct_url = get_direct_url_from_vimeo(get_content(video_url, headers))
+            result.append({'header': unique_title, 'url': video_direct_url})
+        elif 'youtube' in video_url:
+            video_direct_url = get_direct_url_from_youtube(video_url)
+            result.append({'header': unique_title, 'url': video_direct_url})
     return result
 
 
@@ -206,7 +223,8 @@ def download_module(url: str, content: str, base_dir: str):
     files = get_module_files(content)
     video_info_list = get_video_info_list(content)
 
-    module_dir = base_dir + sanitize_filename(module_header)
+    module_path_name = sanitize_filename(module_header)
+    module_dir = base_dir if base_dir.endswith(module_path_name + '/') else (base_dir + module_path_name)
     for video_info in video_info_list:
         download_video(module_dir, video_info)
     if len(files) > 0:
@@ -288,6 +306,7 @@ def smart(url: str, base_dir: str = ''):
 
 # download_module(example_url)
 # download_teach_control('https://glavuch.ru/teach/control/stream/view/id/252290526')
+
 smart(root_url, 'download/')
 # smart('https://glavuch.ru/teach/control/lesson/view/id/173862505')
 print('ready')
